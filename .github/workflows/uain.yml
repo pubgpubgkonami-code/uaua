@@ -1,0 +1,439 @@
+name: Build BurnGuard APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Write project files
+        run: |
+          mkdir -p proj/app/src/main/java/com/hastyar/burnguard
+          mkdir -p proj/app/src/main/res/xml
+          mkdir -p proj/app/src/main/res/values
+          cd proj
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "BurnGuard"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.hastyar.burnguard"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.hastyar.burnguard"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="@string/app_name"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".GuardService"
+                      android:exported="true"
+                      android:label="@string/app_name"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">BurnGuard</string>
+              <string name="service_desc">When TikTok is open, draws a faint colour-shifting layer over the fixed icon areas to reduce screen burn-in. It does not read or collect any content.</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/xml/accessibility_config.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canRetrieveWindowContent="false"
+              android:notificationTimeout="100"
+              android:description="@string/service_desc" />
+          EOF
+
+          cat > app/src/main/java/com/hastyar/burnguard/MainActivity.kt <<'EOF'
+          package com.hastyar.burnguard
+
+          import android.app.Activity
+          import android.content.Context
+          import android.content.Intent
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.SeekBar
+          import android.widget.Switch
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val sp = getSharedPreferences("cfg", Context.MODE_PRIVATE)
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER_HORIZONTAL
+                      setPadding(48, 96, 48, 48)
+                  }
+                  val info = TextView(this).apply {
+                      text = "BurnGuard\n\n١. دوگمەی خوارەوە دابگرە و BurnGuard چالاک بکە\n٢. TikTok بکەرەوە\n\nئەگەر چالاک نەدەکرا: Settings ← Apps ← BurnGuard ← ⋮ ← Allow restricted settings"
+                      textSize = 17f
+                  }
+                  val btn = Button(this).apply {
+                      text = "Accessibility Settings"
+                      setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                  }
+
+                  val label = TextView(this).apply { textSize = 17f; setPadding(0, 48, 0, 8) }
+                  fun updateLabel(p: Int) { label.text = "ڕەشی / کاڵی: " + (p * 100 / 255) + "٪  (کەمتر = کاڵتر)" }
+                  val seek = SeekBar(this).apply {
+                      max = 255
+                      progress = sp.getInt("alpha", 120)
+                      setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                          override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) {
+                              updateLabel(p)
+                              sp.edit().putInt("alpha", p).apply()
+                          }
+                          override fun onStartTrackingTouch(s: SeekBar) {}
+                          override fun onStopTrackingTouch(s: SeekBar) {}
+                      })
+                  }
+                  updateLabel(seek.progress)
+
+                  val sw = Switch(this).apply {
+                      text = "ڕەنگاوڕەنگ (کوژاوە = ڕەش)"
+                      textSize = 17f
+                      isChecked = sp.getBoolean("rainbow", false)
+                      setPadding(0, 48, 0, 0)
+                      setOnCheckedChangeListener { _, on -> sp.edit().putBoolean("rainbow", on).apply() }
+                  }
+
+                  root.addView(info); root.addView(btn)
+                  root.addView(label); root.addView(seek); root.addView(sw)
+                  setContentView(root)
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/hastyar/burnguard/GuardService.kt <<'EOF'
+          package com.hastyar.burnguard
+
+          import android.accessibilityservice.AccessibilityService
+          import android.graphics.PixelFormat
+          import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+
+          class GuardService : AccessibilityService() {
+              private var view: GuardView? = null
+              private val targets = setOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill")
+
+              override fun onAccessibilityEvent(e: AccessibilityEvent) {
+                  if (e.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+                  val p = e.packageName?.toString() ?: return
+                  if (p == "com.android.systemui" || p == packageName ||
+                      p.contains("inputmethod") || p.contains("honeyboard") || p.contains("keyboard")) return
+                  if (p in targets) show() else hide()
+              }
+
+              private fun show() {
+                  if (view != null) return
+                  val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  val lp = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.MATCH_PARENT,
+                      WindowManager.LayoutParams.MATCH_PARENT,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  val v = GuardView(this)
+                  try {
+                      wm.addView(v, lp)
+                      view = v
+                  } catch (_: Exception) {
+                  }
+              }
+
+              private fun hide() {
+                  val v = view ?: return
+                  try {
+                      (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(v)
+                  } catch (_: Exception) {
+                  }
+                  view = null
+              }
+
+              override fun onInterrupt() {}
+
+              override fun onDestroy() {
+                  hide()
+                  super.onDestroy()
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/hastyar/burnguard/GuardView.kt <<'EOF'
+          package com.hastyar.burnguard
+
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.Path
+          import android.graphics.RectF
+          import android.graphics.Typeface
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.View
+
+          // All coordinates are in pixels of the reference screenshot (1189 x 2576)
+          // and are scaled to the real screen automatically.
+          class GuardView(context: Context) : View(context) {
+              private val handler = Handler(Looper.getMainLooper())
+              private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val rect = RectF()
+              private val path = Path()
+              private var t = 0
+              private var k = 0
+
+              // Read live from the app's settings screen
+              private var alphaValue = 120
+              private var rainbow = false
+
+              private val tick = object : Runnable {
+                  override fun run() {
+                      t++
+                      invalidate()
+                      handler.postDelayed(this, 100)
+                  }
+              }
+
+              override fun onAttachedToWindow() {
+                  super.onAttachedToWindow()
+                  handler.post(tick)
+              }
+
+              override fun onDetachedFromWindow() {
+                  handler.removeCallbacks(tick)
+                  super.onDetachedFromWindow()
+              }
+
+              private fun nextColor() {
+                  paint.style = Paint.Style.FILL
+                  paint.color = if (rainbow)
+                      Color.HSVToColor(alphaValue, floatArrayOf((t * 0.8f + k * 37f) % 360f, 0.7f, 1f))
+                  else Color.argb(alphaValue, 0, 0, 0)
+                  k++
+              }
+
+              private fun stroke(width: Float) {
+                  paint.style = Paint.Style.STROKE
+                  paint.strokeWidth = width
+                  paint.strokeCap = Paint.Cap.ROUND
+              }
+
+              private fun rr(c: Canvas, l: Float, t: Float, r: Float, b: Float, rad: Float) {
+                  rect.set(l, t, r, b)
+                  c.drawRoundRect(rect, rad, rad, paint)
+              }
+
+              private fun text(c: Canvas, s: String, x: Float, base: Float, width: Float, bold: Boolean = true) {
+                  paint.typeface = if (bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                  paint.textSize = 50f
+                  paint.textSize = 50f * width / paint.measureText(s)
+                  c.drawText(s, x, base, paint)
+              }
+
+              private fun poly(c: Canvas, vararg p: Float) {
+                  path.reset()
+                  path.moveTo(p[0], p[1])
+                  var i = 2
+                  while (i < p.size) { path.lineTo(p[i], p[i + 1]); i += 2 }
+                  path.close()
+                  c.drawPath(path, paint)
+              }
+
+              private fun heart(c: Canvas, cx: Float, top: Float, w: Float, h: Float) {
+                  fun x(u: Float) = cx - w / 2 + u / 100f * w
+                  fun y(v: Float) = top + v / 92f * h
+                  path.reset()
+                  path.moveTo(x(50f), y(90f))
+                  path.cubicTo(x(5f), y(55f), x(0f), y(25f), x(25f), y(10f))
+                  path.cubicTo(x(40f), y(2f), x(50f), y(12f), x(50f), y(22f))
+                  path.cubicTo(x(50f), y(12f), x(60f), y(2f), x(75f), y(10f))
+                  path.cubicTo(x(100f), y(25f), x(95f), y(55f), x(50f), y(90f))
+                  path.close()
+                  c.drawPath(path, paint)
+              }
+
+              private fun person(c: Canvas, cx: Float, headY: Float, headR: Float, bodyL: Float, bodyT: Float, bodyR: Float, bodyB: Float) {
+                  c.drawCircle(cx, headY, headR, paint)
+                  rect.set(bodyL, bodyT, bodyR, bodyB)
+                  c.drawArc(rect, 180f, 180f, true, paint)
+              }
+
+              override fun onDraw(c: Canvas) {
+                  k = 0
+                  val sp = context.getSharedPreferences("cfg", Context.MODE_PRIVATE)
+                  alphaValue = sp.getInt("alpha", 120)
+                  rainbow = sp.getBoolean("rainbow", false)
+                  c.save()
+                  c.scale(width / 1189f, height / 2576f)
+
+                  // ---------- top bar ----------
+                  // LIVE icon
+                  nextColor(); text(c, "LIVE", 50f, 214f, 70f)
+                  stroke(5f); rr(c, 50f, 183f, 122f, 232f, 10f)
+                  c.drawLine(66f, 160f, 86f, 182f, paint); c.drawLine(106f, 160f, 86f, 182f, paint)
+                  // tabs (real text)
+                  nextColor(); text(c, "Community", 200f, 215f, 278f, false)
+                  nextColor(); text(c, "Following", 528f, 215f, 227f, false)
+                  nextColor(); text(c, "For You", 805f, 215f, 185f)
+                  rr(c, 860f, 255f, 935f, 262f, 3f)
+                  // search icon
+                  nextColor(); stroke(7f)
+                  c.drawCircle(1097f, 193f, 25f, paint)
+                  c.drawLine(1115f, 211f, 1135f, 230f, paint)
+
+                  // ---------- right column ----------
+                  // profile + follow badge
+                  nextColor(); c.drawCircle(1096f, 1217f, 67f, paint)
+                  c.drawCircle(1095f, 1285f, 34f, paint)
+                  // like
+                  nextColor(); heart(c, 1096f, 1368f, 93f, 84f)
+                  rr(c, 1050f, 1466f, 1142f, 1498f, 8f)
+                  // comment: hidden completely
+                  paint.style = Paint.Style.FILL; paint.color = Color.rgb(25, 25, 25)
+                  rr(c, 1046f, 1548f, 1144f, 1692f, 16f)
+                  // save (bookmark)
+                  nextColor()
+                  poly(c, 1062f, 1742f, 1130f, 1742f, 1130f, 1818f, 1096f, 1790f, 1062f, 1818f)
+                  rr(c, 1050f, 1840f, 1142f, 1872f, 8f)
+                  // share (arrow)
+                  nextColor()
+                  poly(c, 1052f, 2003f, 1056f, 1970f, 1075f, 1952f, 1102f, 1946f, 1102f, 1925f,
+                      1140f, 1962f, 1102f, 1999f, 1102f, 1978f, 1085f, 1980f, 1068f, 1988f)
+                  rr(c, 1048f, 2022f, 1146f, 2056f, 8f)
+                  // sound avatar
+                  nextColor(); c.drawCircle(1100f, 2177f, 62f, paint)
+
+                  // ---------- bottom-left text ----------
+                  nextColor()
+                  rr(c, 38f, 2062f, 305f, 2108f, 8f)
+                  rr(c, 38f, 2142f, 690f, 2185f, 8f)
+                  rr(c, 38f, 2198f, 932f, 2240f, 8f)
+
+                  // ---------- bottom nav ----------
+                  // Home (box) + label
+                  nextColor(); rr(c, 85f, 2305f, 152f, 2370f, 10f)
+                  text(c, "Home", 75f, 2402f, 90f)
+                  // Friends: two people + red dot + label
+                  nextColor()
+                  person(c, 345f, 2320f, 17f, 320f, 2345f, 372f, 2392f)
+                  person(c, 380f, 2330f, 14f, 362f, 2352f, 402f, 2392f)
+                  c.drawCircle(407f, 2300f, 11f, paint)
+                  text(c, "Friends", 302f, 2402f, 111f)
+                  // + button
+                  nextColor(); rr(c, 523f, 2307f, 665f, 2395f, 24f)
+                  // Inbox: chat bubble + badge + label
+                  nextColor()
+                  rr(c, 798f, 2302f, 868f, 2358f, 20f)
+                  poly(c, 815f, 2354f, 838f, 2354f, 812f, 2378f)
+                  rr(c, 835f, 2285f, 912f, 2330f, 22f)
+                  text(c, "Inbox", 790f, 2402f, 85f)
+                  // Profile: person + label
+                  nextColor()
+                  person(c, 1070f, 2322f, 20f, 1040f, 2348f, 1100f, 2400f)
+                  text(c, "Profile", 1022f, 2402f, 96f)
+
+                  c.restore()
+              }
+          }
+          EOF
+
+      - name: Build
+        working-directory: proj
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BurnGuard-apk
+          path: proj/app/build/outputs/apk/debug/app-debug.apk

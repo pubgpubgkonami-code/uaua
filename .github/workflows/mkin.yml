@@ -1,0 +1,312 @@
+name: Build BurnGuard AP
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Write project files
+        run: |
+          mkdir -p proj/app/src/main/java/com/hastyar/burnguard
+          mkdir -p proj/app/src/main/res/xml
+          mkdir -p proj/app/src/main/res/values
+          cd proj
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "BurnGuard"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.hastyar.burnguard"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.hastyar.burnguard"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="@string/app_name"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".GuardService"
+                      android:exported="true"
+                      android:label="@string/app_name"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">BurnGuard</string>
+              <string name="service_desc">When TikTok is open, draws a faint colour-shifting layer over the fixed icon areas to reduce screen burn-in. It does not read or collect any content.</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/xml/accessibility_config.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canRetrieveWindowContent="false"
+              android:notificationTimeout="100"
+              android:description="@string/service_desc" />
+          EOF
+
+          cat > app/src/main/java/com/hastyar/burnguard/MainActivity.kt <<'EOF'
+          package com.hastyar.burnguard
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER
+                      setPadding(64, 64, 64, 64)
+                  }
+                  val tv = TextView(this).apply {
+                      text = "BurnGuard\n\n١. دوگمەکەی خوارەوە دابگرە\n٢. BurnGuard هەڵبژێرە و چالاکی بکە\n٣. TikTok بکەرەوە\n\nئەگەر چالاک نەدەکرا: Settings ← Apps ← BurnGuard ← ⋮ ← Allow restricted settings"
+                      textSize = 18f
+                  }
+                  val btn = Button(this).apply {
+                      text = "Accessibility Settings"
+                      setOnClickListener {
+                          startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                      }
+                  }
+                  root.addView(tv)
+                  root.addView(btn)
+                  setContentView(root)
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/hastyar/burnguard/GuardService.kt <<'EOF'
+          package com.hastyar.burnguard
+
+          import android.accessibilityservice.AccessibilityService
+          import android.graphics.PixelFormat
+          import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+
+          class GuardService : AccessibilityService() {
+              private var view: GuardView? = null
+              private val targets = setOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill")
+
+              override fun onAccessibilityEvent(e: AccessibilityEvent) {
+                  if (e.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+                  val p = e.packageName?.toString() ?: return
+                  if (p == "com.android.systemui" || p == packageName ||
+                      p.contains("inputmethod") || p.contains("honeyboard") || p.contains("keyboard")) return
+                  if (p in targets) show() else hide()
+              }
+
+              private fun show() {
+                  if (view != null) return
+                  val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  val lp = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.MATCH_PARENT,
+                      WindowManager.LayoutParams.MATCH_PARENT,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  val v = GuardView(this)
+                  try {
+                      wm.addView(v, lp)
+                      view = v
+                  } catch (_: Exception) {
+                  }
+              }
+
+              private fun hide() {
+                  val v = view ?: return
+                  try {
+                      (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(v)
+                  } catch (_: Exception) {
+                  }
+                  view = null
+              }
+
+              override fun onInterrupt() {}
+
+              override fun onDestroy() {
+                  hide()
+                  super.onDestroy()
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/hastyar/burnguard/GuardView.kt <<'EOF'
+          package com.hastyar.burnguard
+
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.RectF
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.View
+
+          // Each box = exact area of one TikTok element, as fractions of the screen (left, top, right, bottom)
+          private class Box(val l: Float, val t: Float, val r: Float, val b: Float, val hide: Boolean = false)
+
+          class GuardView(context: Context) : View(context) {
+              private val handler = Handler(Looper.getMainLooper())
+              private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val rect = RectF()
+              private var t = 0
+
+              // 0-255. Higher = covers the icons more (less visible), lower = icons stay clearer
+              private val alphaValue = 90
+
+              private val boxes = listOf(
+                  // top bar
+                  Box(0.040f, 0.061f, 0.105f, 0.091f),   // LIVE
+                  Box(0.168f, 0.064f, 0.402f, 0.103f),   // Community
+                  Box(0.444f, 0.064f, 0.635f, 0.103f),   // Following
+                  Box(0.677f, 0.064f, 0.833f, 0.103f),   // For You + underline
+                  Box(0.898f, 0.064f, 0.957f, 0.089f),   // Search
+                  // right column
+                  Box(0.865f, 0.446f, 0.978f, 0.512f),   // profile + follow (+)
+                  Box(0.879f, 0.530f, 0.966f, 0.582f),   // like + count
+                  Box(0.879f, 0.602f, 0.960f, 0.655f, hide = true), // comment: fully hidden
+                  Box(0.880f, 0.676f, 0.964f, 0.726f),   // save + count
+                  Box(0.879f, 0.746f, 0.966f, 0.798f),   // share + count
+                  Box(0.873f, 0.821f, 0.977f, 0.869f),   // sound/avatar
+                  // bottom-left text
+                  Box(0.032f, 0.799f, 0.257f, 0.819f),   // username
+                  Box(0.032f, 0.830f, 0.784f, 0.870f),   // caption
+                  // bottom nav
+                  Box(0.059f, 0.893f, 0.141f, 0.936f),   // Home
+                  Box(0.252f, 0.887f, 0.352f, 0.936f),   // Friends
+                  Box(0.440f, 0.895f, 0.559f, 0.930f),   // + button
+                  Box(0.664f, 0.887f, 0.770f, 0.936f),   // Inbox
+                  Box(0.856f, 0.893f, 0.944f, 0.936f)    // Profile
+              )
+
+              private val tick = object : Runnable {
+                  override fun run() {
+                      t++
+                      invalidate()
+                      handler.postDelayed(this, 100)
+                  }
+              }
+
+              override fun onAttachedToWindow() {
+                  super.onAttachedToWindow()
+                  handler.post(tick)
+              }
+
+              override fun onDetachedFromWindow() {
+                  handler.removeCallbacks(tick)
+                  super.onDetachedFromWindow()
+              }
+
+              override fun onDraw(c: Canvas) {
+                  val w = width.toFloat()
+                  val h = height.toFloat()
+                  for ((i, b) in boxes.withIndex()) {
+                      paint.color = if (b.hide) Color.rgb(25, 25, 25)
+                      else Color.HSVToColor(alphaValue, floatArrayOf((t * 0.8f + i * 37f) % 360f, 0.7f, 1f))
+                      rect.set(b.l * w, b.t * h, b.r * w, b.b * h)
+                      c.drawRoundRect(rect, 14f, 14f, paint)
+                  }
+              }
+          }
+          EOF
+
+      - name: Build
+        working-directory: proj
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BurnGuard-apk
+          path: proj/app/build/outputs/apk/debug/app-debug.apk
